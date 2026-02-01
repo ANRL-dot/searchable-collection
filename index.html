@@ -5,12 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ANRL Library Collection Search</title>
 
-  <!-- DataTables (for nice table UI on just the current page of results) -->
+  <!-- DataTables (table UI) -->
   <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
   <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
-
-  <!-- Google Charts loader (required for google.visualization.Query) -->
-  <script src="https://www.gstatic.com/charts/loader.js"></script>
 
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
@@ -44,7 +41,7 @@
     </select>
 
     <label for="term">Title contains:</label>
-    <input id="term" type="search" placeholder="Type a word/phrase (e.g., 'sunshine', 'newsletter')">
+    <input id="term" type="search" placeholder="Type a word/phrase (e.g., sunshine, newsletter)">
 
     <label for="size">Rows:</label>
     <select id="size">
@@ -64,7 +61,7 @@
     <button id="toggleSheetBtn" type="button">Show full sheet view</button>
   </div>
 
-  <div id="status">Ready (no data loaded yet).</div>
+  <div id="status">Ready. Enter a filter and click Search.</div>
   <div id="err"></div>
 
   <div class="table-wrap">
@@ -79,14 +76,16 @@
     // =========================
     // CONFIG
     // =========================
-    // Use your published (2PACX...) dataset URL for GViz + the published iframe for full view.
+    // Published sheet (2PACX...) base:
     const GVIZ_BASE =
-      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/gviz/tq?gid=104159087&headers=1";
+      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/gviz/tq";
+
+    const GID = "104159087";
+    const HEADERS = 1;
+    const TITLE_HEADER = "Title"; // must match your sheet header exactly
 
     const FULL_SHEET_IFRAME =
       "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/pubhtml?gid=104159087&single=true&widget=true&headers=false";
-
-    const TITLE_HEADER = "Title"; // must match the header text in row 1 exactly
     // =========================
 
     const $ = (id) => document.getElementById(id);
@@ -111,36 +110,68 @@
       return s;
     }
 
-    function gvizQuery(tq) {
+    // -------------------------
+    // GViz JSONP (no CORS)
+    // -------------------------
+    function gvizJsonpQuery(tq) {
       return new Promise((resolve, reject) => {
-        const q = new google.visualization.Query(GVIZ_BASE);
-        q.setQuery(tq);
-        q.send((resp) => {
-          if (resp.isError()) reject(new Error(resp.getMessage() + "\n" + resp.getDetailedMessage()));
-          else resolve(resp.getDataTable());
-        });
+        const cb = "__gviz_cb_" + Math.random().toString(36).slice(2);
+        const script = document.createElement("script");
+
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error("GViz request timed out."));
+        }, 15000);
+
+        function cleanup() {
+          clearTimeout(timeout);
+          try { delete window[cb]; } catch (_) { window[cb] = undefined; }
+          if (script && script.parentNode) script.parentNode.removeChild(script);
+        }
+
+        window[cb] = (resp) => {
+          cleanup();
+          // resp.status: "ok" | "error"
+          if (!resp || resp.status !== "ok") {
+            const e = (resp && resp.errors && resp.errors[0]) ? resp.errors[0] : null;
+            const msg = e
+              ? (e.detailed_message || e.message || JSON.stringify(e))
+              : "Unknown GViz error response.";
+            reject(new Error(msg));
+            return;
+          }
+          resolve(resp.table);
+        };
+
+        const tqx = encodeURIComponent("out:json;responseHandler:" + cb);
+        const url =
+          `${GVIZ_BASE}?gid=${encodeURIComponent(GID)}&headers=${encodeURIComponent(HEADERS)}` +
+          `&tq=${encodeURIComponent(tq)}&tqx=${tqx}`;
+
+        script.src = url;
+        // If load fails entirely (blocked), you'll get no callback -> timeout will fire
+        document.head.appendChild(script);
       });
     }
 
-    // State
-    let schema = null; // { labels[], titleIdx, titleColLetter }
+    // -------------------------
+    // Paging/filter state
+    // -------------------------
+    let schema = null;   // { labels[], titleIdx, titleColLetter }
     let offset = 0;
     let pageSize = Number($("size").value);
     let pageNum = 1;
-    let table = null;
     let lastRowsReturned = 0;
+    let tableDT = null;
 
     async function loadSchemaOnce() {
       if (schema) return schema;
 
       setStatus("Loading columns…");
-      const dt = await gvizQuery("select * limit 0");
+      // limit 0: just schema
+      const t = await gvizJsonpQuery("select * limit 0");
 
-      const labels = [];
-      for (let c = 0; c < dt.getNumberOfColumns(); c++) {
-        labels.push(dt.getColumnLabel(c) || `Column ${c+1}`);
-      }
-
+      const labels = (t.cols || []).map((c, i) => (c.label && c.label.trim()) ? c.label : ("Column " + (i+1)));
       const titleIdx = labels.indexOf(TITLE_HEADER);
       if (titleIdx === -1) {
         throw new Error(
@@ -157,27 +188,34 @@
       const parts = [];
       const starts = $("starts").value;
       const term = $("term").value.trim();
+      const L = schema.titleColLetter;
 
-      // Title starts with: A-Z or 0-9 (uses "matches" for regex)
       if (starts) {
-        const L = schema.titleColLetter;
         if (starts === "0-9") {
           parts.push(`${L} matches '^[0-9]'`);
         } else {
-          const ch = escapeQuotes(starts);
-          parts.push(`lower(${L}) matches '^${ch.toLowerCase()}'`);
+          const ch = escapeQuotes(starts.toLowerCase());
+          parts.push(`lower(${L}) matches '^${ch}'`);
         }
       }
 
-      // Title contains:
       if (term) {
-        const L = schema.titleColLetter;
         const t = escapeQuotes(term.toLowerCase());
         parts.push(`lower(${L}) contains '${t}'`);
       }
 
-      if (!parts.length) return "";
-      return " where " + parts.join(" and ");
+      return parts.length ? (" where " + parts.join(" and ")) : "";
+    }
+
+    function toRowArray(gvizRow, colCount) {
+      const cells = gvizRow.c || [];
+      const row = new Array(colCount);
+      for (let i = 0; i < colCount; i++) {
+        const cell = cells[i];
+        // prefer formatted value
+        row[i] = cell ? (cell.f ?? cell.v ?? "") : "";
+      }
+      return row;
     }
 
     async function loadPage() {
@@ -187,50 +225,38 @@
 
         await loadSchemaOnce();
 
-        // Stable paging requires a stable sort: always order by Title ascending
+        // stable paging: always order by Title
         const L = schema.titleColLetter;
         const where = buildWhereClause();
         const tq = `select *${where} order by ${L} asc limit ${pageSize} offset ${offset}`;
 
         setStatus("Loading page…");
-        const dt = await gvizQuery(tq);
+        const t = await gvizJsonpQuery(tq);
 
-        const colCount = dt.getNumberOfColumns();
-        const rowCount = dt.getNumberOfRows();
-        lastRowsReturned = rowCount;
+        const colCount = (t.cols || []).length;
+        const rows = (t.rows || []).map(r => toRowArray(r, colCount));
+        lastRowsReturned = rows.length;
 
         const columns = schema.labels.map(h => ({ title: h }));
-        const rows = [];
 
-        for (let r = 0; r < rowCount; r++) {
-          const row = [];
-          for (let c = 0; c < colCount; c++) {
-            const f = dt.getFormattedValue(r, c);
-            row.push((f !== null && f !== undefined && f !== "") ? f : (dt.getValue(r, c) ?? ""));
-          }
-          rows.push(row);
-        }
-
-        // Initialize or update DataTable (client-side for current page only)
-        if (!table) {
-          table = new DataTable("#tbl", {
+        if (!tableDT) {
+          tableDT = new DataTable("#tbl", {
             data: rows,
             columns,
             pageLength: pageSize,
-            searching: false,  // we do search via the GViz query
+            searching: false,  // search happens via GViz query
             ordering: true,    // sorts within the current page only
             deferRender: true
           });
         } else {
-          table.clear();
-          table.rows.add(rows);
-          table.draw();
+          tableDT.clear();
+          tableDT.rows.add(rows);
+          tableDT.draw();
         }
 
-        // Update paging controls
-        $("pageInfo").textContent = `Page ${pageNum} (showing ${rowCount} rows)`;
+        $("pageInfo").textContent = `Page ${pageNum} (showing ${rows.length} rows)`;
         $("prevBtn").disabled = (offset === 0);
-        $("nextBtn").disabled = (rowCount < pageSize); // if fewer than requested, likely no next page
+        $("nextBtn").disabled = (rows.length < pageSize);
 
         setStatus("Ready.");
       } catch (e) {
@@ -247,13 +273,15 @@
       loadPage();
     }
 
+    // -------------------------
     // UI wiring
+    // -------------------------
     $("searchBtn").addEventListener("click", resetAndSearch);
     $("term").addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); resetAndSearch(); }
     });
     $("starts").addEventListener("change", resetAndSearch);
-    $("size").addEventListener("change", () => { resetAndSearch(); });
+    $("size").addEventListener("change", resetAndSearch);
 
     $("clearBtn").addEventListener("click", () => {
       $("starts").value = "";
@@ -275,7 +303,7 @@
       loadPage();
     });
 
-    // Full sheet view toggle (loads only when requested)
+    // Full sheet toggle: load only on demand, unload when hidden
     let sheetShown = false;
     $("toggleSheetBtn").addEventListener("click", () => {
       const wrap = $("sheetWrap");
@@ -287,24 +315,14 @@
         wrap.style.display = "block";
         $("toggleSheetBtn").textContent = "Hide full sheet view";
       } else {
-        // unload to stop docs.google.com work
         frame.src = "about:blank";
         wrap.style.display = "none";
         $("toggleSheetBtn").textContent = "Show full sheet view";
       }
     });
 
-    // Catch errors so they show on-page instead of freezing silently
-    window.addEventListener("error", (e) => showErr("JavaScript error:\n" + (e.message || e.error || e)));
-    window.addEventListener("unhandledrejection", (e) => showErr("Unhandled promise rejection:\n" + (e.reason?.message || e.reason || e)));
-
-    // Boot Google Charts, but do NOT auto-load data (prevents immediate heavy calls)
-    google.charts.load("current", { packages: ["table"] });
-    google.charts.setOnLoadCallback(() => {
-      setStatus("Ready. Enter a Title filter and click Search.");
-      // Optional: uncomment this to load first page immediately (may be heavier):
-      // resetAndSearch();
-    });
+    // Do not auto-load; avoids any immediate heavy work
+    setStatus("Ready. Enter a Title filter and click Search.");
   </script>
 </body>
 </html>
