@@ -3,92 +3,104 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Library Collection Search</title>
+  <title>ANRL Library Collection Search</title>
 
-  <!-- DataTables 2 -->
+  <!-- DataTables (for nice table UI on just the current page of results) -->
   <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
   <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
 
-  <!-- Google Charts loader (for google.visualization.Query) -->
+  <!-- Google Charts loader (required for google.visualization.Query) -->
   <script src="https://www.gstatic.com/charts/loader.js"></script>
 
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
     .controls { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
     label { font-weight: 600; }
-    input[type="search"], select, button { padding: 8px; }
-    #globalSearch { flex: 1; min-width: 260px; }
-    #titleFilter { min-width: 320px; }
+    select, input[type="search"], button { padding: 8px; }
+    #term { flex: 1; min-width: 240px; }
     #status { font-size: 13px; color:#444; margin: 6px 0 12px; }
-    #error { display:none; color:#b00020; margin: 8px 0; white-space: pre-wrap; }
+    #err { display:none; color:#b00020; margin: 8px 0; white-space: pre-wrap; }
+    .btnrow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin: 10px 0 14px; }
     .table-wrap { width: 100%; overflow-x: auto; }
-    .section-title { font-weight: 700; margin: 18px 0 8px; }
-    .iframe-wrap { width: 100%; height: 720px; }
-    iframe { width: 100%; height: 100%; border: 0; }
-    .small { font-size: 12px; color:#555; }
+    .muted { color:#666; font-size: 12px; }
+    .sheet-wrap { margin-top: 16px; display:none; }
+    .sheet-frame { width:100%; height:720px; border:0; }
   </style>
 </head>
 
 <body>
   <div class="controls">
-    <label for="titleFilter">Title contains:</label>
-    <input id="titleFilter" type="search" placeholder="Type part of a title…" />
+    <label for="starts">Title starts with:</label>
+    <select id="starts">
+      <option value="">Any</option>
+      <option value="0-9">0–9</option>
+      <option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="D">D</option>
+      <option value="E">E</option><option value="F">F</option><option value="G">G</option><option value="H">H</option>
+      <option value="I">I</option><option value="J">J</option><option value="K">K</option><option value="L">L</option>
+      <option value="M">M</option><option value="N">N</option><option value="O">O</option><option value="P">P</option>
+      <option value="Q">Q</option><option value="R">R</option><option value="S">S</option><option value="T">T</option>
+      <option value="U">U</option><option value="V">V</option><option value="W">W</option><option value="X">X</option>
+      <option value="Y">Y</option><option value="Z">Z</option>
+    </select>
 
-    <label for="globalSearch">Search all text columns:</label>
-    <input id="globalSearch" type="search" placeholder="Type and press Enter (or wait)…" />
+    <label for="term">Title contains:</label>
+    <input id="term" type="search" placeholder="Type a word/phrase (e.g., 'sunshine', 'newsletter')">
 
-    <label for="pageSize">Rows:</label>
-    <select id="pageSize">
+    <label for="size">Rows:</label>
+    <select id="size">
       <option>25</option>
       <option selected>50</option>
       <option>100</option>
     </select>
 
+    <button id="searchBtn" type="button">Search</button>
     <button id="clearBtn" type="button">Clear</button>
   </div>
 
-  <div id="status">Loading…</div>
-  <div id="error"></div>
+  <div class="btnrow">
+    <button id="prevBtn" type="button" disabled>Prev</button>
+    <button id="nextBtn" type="button" disabled>Next</button>
+    <span class="muted" id="pageInfo">Page 1</span>
+    <button id="toggleSheetBtn" type="button">Show full sheet view</button>
+  </div>
+
+  <div id="status">Ready (no data loaded yet).</div>
+  <div id="err"></div>
 
   <div class="table-wrap">
     <table id="tbl" class="display" style="width:100%"></table>
   </div>
 
-  <div class="section-title">Full Sheet View</div>
-  <div class="iframe-wrap">
-    <iframe
-      loading="lazy"
-      src="https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/pubhtml?gid=104159087&single=true&widget=true&headers=false">
-    </iframe>
+  <div class="sheet-wrap" id="sheetWrap">
+    <iframe class="sheet-frame" id="sheetFrame" loading="lazy"></iframe>
   </div>
 
   <script>
     // =========================
     // CONFIG
     // =========================
-    // Use the published (2PACX...) datasource for consistency with your publish URL:
-    const BASE_GVIZ_URL =
+    // Use your published (2PACX...) dataset URL for GViz + the published iframe for full view.
+    const GVIZ_BASE =
       "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/gviz/tq?gid=104159087&headers=1";
 
-    const TITLE_HEADER = "Title"; // must match your header text exactly
+    const FULL_SHEET_IFRAME =
+      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/pubhtml?gid=104159087&single=true&widget=true&headers=false";
 
+    const TITLE_HEADER = "Title"; // must match the header text in row 1 exactly
     // =========================
-    // Helpers
-    // =========================
-    const statusEl = document.getElementById("status");
-    const errorEl  = document.getElementById("error");
+
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status");
+    const errEl = $("err");
 
     function setStatus(msg) { statusEl.textContent = msg; }
-    function showError(msg) { errorEl.style.display = "block"; errorEl.textContent = msg; setStatus("Error"); }
-    function clearError()   { errorEl.style.display = "none";  errorEl.textContent = ""; }
+    function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; }
+    function clearErr() { errEl.style.display = "none"; errEl.textContent = ""; }
 
-    function escapeQuotes(s) {
-      // Google query language uses single quotes. Escape by doubling.
-      return String(s).replace(/'/g, "''");
-    }
+    function escapeQuotes(s) { return String(s).replace(/'/g, "''"); }
 
+    // 0->A, 1->B, ... 25->Z, 26->AA ...
     function colLetter(i) {
-      // 0->A, 1->B, ... 25->Z, 26->AA, ...
       let s = "";
       i += 1;
       while (i > 0) {
@@ -99,220 +111,199 @@
       return s;
     }
 
-    function isTruthy(v) { return v !== null && v !== undefined && String(v).trim() !== ""; }
-
-    // Catch page-killing errors so you see what broke
-    window.addEventListener("error", (e) => showError("JavaScript error:\n" + (e.message || e.error || e)));
-    window.addEventListener("unhandledrejection", (e) => showError("Unhandled promise rejection:\n" + (e.reason?.message || e.reason || e)));
-
-    // =========================
-    // GViz query wrapper
-    // =========================
     function gvizQuery(tq) {
       return new Promise((resolve, reject) => {
-        const q = new google.visualization.Query(BASE_GVIZ_URL);
+        const q = new google.visualization.Query(GVIZ_BASE);
         q.setQuery(tq);
         q.send((resp) => {
-          if (resp.isError()) {
-            reject(new Error(resp.getMessage() + "\n" + resp.getDetailedMessage()));
-            return;
-          }
-          resolve(resp.getDataTable());
+          if (resp.isError()) reject(new Error(resp.getMessage() + "\n" + resp.getDetailedMessage()));
+          else resolve(resp.getDataTable());
         });
       });
     }
 
-    // =========================
-    // Server-side DataTables
-    // =========================
-    let schema = null;              // { labels:[], types:[], titleIdx:int, stringIdxs:[] }
-    let cachedTotal = null;         // total row count
-    let dtInstance = null;
+    // State
+    let schema = null; // { labels[], titleIdx, titleColLetter }
+    let offset = 0;
+    let pageSize = Number($("size").value);
+    let pageNum = 1;
+    let table = null;
+    let lastRowsReturned = 0;
 
-    async function loadSchema() {
-      // Get headers + types without pulling data
+    async function loadSchemaOnce() {
+      if (schema) return schema;
+
+      setStatus("Loading columns…");
       const dt = await gvizQuery("select * limit 0");
+
       const labels = [];
-      const types = [];
       for (let c = 0; c < dt.getNumberOfColumns(); c++) {
         labels.push(dt.getColumnLabel(c) || `Column ${c+1}`);
-        types.push(dt.getColumnType(c));
       }
+
       const titleIdx = labels.indexOf(TITLE_HEADER);
-      const stringIdxs = types.map((t, i) => (t === "string" ? i : -1)).filter(i => i >= 0);
-
-      return { labels, types, titleIdx, stringIdxs };
-    }
-
-    async function loadTotalCount() {
-      // Count rows using first column (A) as a proxy; for spreadsheets this works well.
-      const dt = await gvizQuery("select count(A)");
-      const v = dt.getValue(0, 0);
-      return Number(v) || 0;
-    }
-
-    function buildWhereClause(globalTerm, titleTerm) {
-      const parts = [];
-
-      // Title filter (contains) on Title column only (fast + avoids huge dropdown lists)
-      if (schema.titleIdx >= 0 && isTruthy(titleTerm)) {
-        const L = colLetter(schema.titleIdx);
-        const t = escapeQuotes(titleTerm.trim().toLowerCase());
-        parts.push(`lower(${L}) contains '${t}'`);
+      if (titleIdx === -1) {
+        throw new Error(
+          `Could not find a "${TITLE_HEADER}" header.\n` +
+          `Detected headers:\n- ${labels.join("\n- ")}`
+        );
       }
 
-      // Global search across all STRING columns
-      if (isTruthy(globalTerm)) {
-        const t = escapeQuotes(globalTerm.trim().toLowerCase());
-        const ors = schema.stringIdxs.map(i => `lower(${colLetter(i)}) contains '${t}'`);
-        if (ors.length) parts.push("(" + ors.join(" or ") + ")");
+      schema = { labels, titleIdx, titleColLetter: colLetter(titleIdx) };
+      return schema;
+    }
+
+    function buildWhereClause() {
+      const parts = [];
+      const starts = $("starts").value;
+      const term = $("term").value.trim();
+
+      // Title starts with: A-Z or 0-9 (uses "matches" for regex)
+      if (starts) {
+        const L = schema.titleColLetter;
+        if (starts === "0-9") {
+          parts.push(`${L} matches '^[0-9]'`);
+        } else {
+          const ch = escapeQuotes(starts);
+          parts.push(`lower(${L}) matches '^${ch.toLowerCase()}'`);
+        }
+      }
+
+      // Title contains:
+      if (term) {
+        const L = schema.titleColLetter;
+        const t = escapeQuotes(term.toLowerCase());
+        parts.push(`lower(${L}) contains '${t}'`);
       }
 
       if (!parts.length) return "";
       return " where " + parts.join(" and ");
     }
 
-    async function countFiltered(whereClause) {
-      if (!whereClause) return cachedTotal;
-      const dt = await gvizQuery(`select count(A)${whereClause}`);
-      const v = dt.getValue(0, 0);
-      return Number(v) || 0;
-    }
+    async function loadPage() {
+      try {
+        clearErr();
+        pageSize = Number($("size").value);
 
-    async function fetchPage(whereClause, orderBy, limit, offset) {
-      const tq = `select *${whereClause}${orderBy} limit ${limit} offset ${offset}`;
-      const dt = await gvizQuery(tq);
+        await loadSchemaOnce();
 
-      const rows = [];
-      const rN = dt.getNumberOfRows();
-      const cN = dt.getNumberOfColumns();
+        // Stable paging requires a stable sort: always order by Title ascending
+        const L = schema.titleColLetter;
+        const where = buildWhereClause();
+        const tq = `select *${where} order by ${L} asc limit ${pageSize} offset ${offset}`;
 
-      for (let r = 0; r < rN; r++) {
-        const row = [];
-        for (let c = 0; c < cN; c++) {
-          // Use formatted value when present so dates/nums look nice
-          const f = dt.getFormattedValue(r, c);
-          row.push(f !== null && f !== undefined && f !== "" ? f : (dt.getValue(r, c) ?? ""));
-        }
-        rows.push(row);
-      }
-      return rows;
-    }
+        setStatus("Loading page…");
+        const dt = await gvizQuery(tq);
 
-    function getOrderBy(dtRequest) {
-      // Use first sort instruction only
-      if (!dtRequest.order || !dtRequest.order.length) return "";
-      const ord = dtRequest.order[0];
-      const colIdx = ord.column;
-      const dir = (ord.dir || "asc").toLowerCase() === "desc" ? "desc" : "asc";
-      const L = colLetter(colIdx);
-      return ` order by ${L} ${dir}`;
-    }
+        const colCount = dt.getNumberOfColumns();
+        const rowCount = dt.getNumberOfRows();
+        lastRowsReturned = rowCount;
 
-    function wireControls() {
-      const titleInput = document.getElementById("titleFilter");
-      const globalInput = document.getElementById("globalSearch");
-      const pageSizeSel = document.getElementById("pageSize");
-      const clearBtn = document.getElementById("clearBtn");
+        const columns = schema.labels.map(h => ({ title: h }));
+        const rows = [];
 
-      let debounceTimer = null;
-      function debouncedReload() {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => dtInstance.ajax.reload(null, true), 350);
-      }
-
-      // Title filter: reload after pause or Enter
-      titleInput.addEventListener("input", debouncedReload);
-      titleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); dtInstance.ajax.reload(null, true); } });
-
-      // Global search: reload after pause or Enter
-      globalInput.addEventListener("input", debouncedReload);
-      globalInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); dtInstance.ajax.reload(null, true); } });
-
-      // Page size
-      pageSizeSel.addEventListener("change", () => {
-        dtInstance.page.len(Number(pageSizeSel.value)).draw();
-      });
-
-      // Clear
-      clearBtn.addEventListener("click", () => {
-        titleInput.value = "";
-        globalInput.value = "";
-        dtInstance.ajax.reload(null, true);
-      });
-    }
-
-    async function init() {
-      if (typeof DataTable === "undefined") {
-        showError("DataTables failed to load.");
-        return;
-      }
-      if (!window.google || !google.charts) {
-        showError("Google Charts loader failed to load.");
-        return;
-      }
-
-      setStatus("Loading schema…");
-      schema = await loadSchema();
-
-      setStatus("Counting rows…");
-      cachedTotal = await loadTotalCount();
-
-      const columns = schema.labels.map(t => ({ title: t }));
-
-      clearError();
-      setStatus(`Ready. Total rows: ${cachedTotal.toLocaleString()}.`);
-
-      dtInstance = new DataTable("#tbl", {
-        columns,
-        processing: true,
-        serverSide: true,
-        paging: true,
-        pageLength: Number(document.getElementById("pageSize").value),
-        deferRender: true,
-        searching: false, // we drive search via our inputs
-        ajax: async (request, callback) => {
-          try {
-            setStatus("Loading page…");
-
-            const titleTerm  = document.getElementById("titleFilter").value || "";
-            const globalTerm = document.getElementById("globalSearch").value || "";
-
-            const whereClause = buildWhereClause(globalTerm, titleTerm);
-            const orderBy = getOrderBy(request);
-
-            const limit  = request.length || 50;
-            const offset = request.start  || 0;
-
-            // counts
-            const recordsTotal = cachedTotal;
-            const recordsFiltered = await countFiltered(whereClause);
-
-            // page data
-            const data = await fetchPage(whereClause, orderBy, limit, offset);
-
-            setStatus(`Showing ${Math.min(offset + limit, recordsFiltered).toLocaleString()} of ${recordsFiltered.toLocaleString()} (total ${recordsTotal.toLocaleString()}).`);
-
-            callback({
-              draw: request.draw,
-              recordsTotal,
-              recordsFiltered,
-              data
-            });
-          } catch (err) {
-            showError("Load failed:\n" + (err?.message || String(err)));
-            callback({ draw: request.draw, recordsTotal: cachedTotal || 0, recordsFiltered: 0, data: [] });
+        for (let r = 0; r < rowCount; r++) {
+          const row = [];
+          for (let c = 0; c < colCount; c++) {
+            const f = dt.getFormattedValue(r, c);
+            row.push((f !== null && f !== undefined && f !== "") ? f : (dt.getValue(r, c) ?? ""));
           }
+          rows.push(row);
         }
-      });
 
-      wireControls();
+        // Initialize or update DataTable (client-side for current page only)
+        if (!table) {
+          table = new DataTable("#tbl", {
+            data: rows,
+            columns,
+            pageLength: pageSize,
+            searching: false,  // we do search via the GViz query
+            ordering: true,    // sorts within the current page only
+            deferRender: true
+          });
+        } else {
+          table.clear();
+          table.rows.add(rows);
+          table.draw();
+        }
+
+        // Update paging controls
+        $("pageInfo").textContent = `Page ${pageNum} (showing ${rowCount} rows)`;
+        $("prevBtn").disabled = (offset === 0);
+        $("nextBtn").disabled = (rowCount < pageSize); // if fewer than requested, likely no next page
+
+        setStatus("Ready.");
+      } catch (e) {
+        setStatus("Error");
+        showErr(String(e && e.message ? e.message : e));
+        $("prevBtn").disabled = true;
+        $("nextBtn").disabled = true;
+      }
     }
 
-    // Boot Google Charts then init
+    function resetAndSearch() {
+      offset = 0;
+      pageNum = 1;
+      loadPage();
+    }
+
+    // UI wiring
+    $("searchBtn").addEventListener("click", resetAndSearch);
+    $("term").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); resetAndSearch(); }
+    });
+    $("starts").addEventListener("change", resetAndSearch);
+    $("size").addEventListener("change", () => { resetAndSearch(); });
+
+    $("clearBtn").addEventListener("click", () => {
+      $("starts").value = "";
+      $("term").value = "";
+      resetAndSearch();
+    });
+
+    $("prevBtn").addEventListener("click", () => {
+      if (offset === 0) return;
+      offset = Math.max(0, offset - pageSize);
+      pageNum = Math.max(1, pageNum - 1);
+      loadPage();
+    });
+
+    $("nextBtn").addEventListener("click", () => {
+      if (lastRowsReturned < pageSize) return;
+      offset += pageSize;
+      pageNum += 1;
+      loadPage();
+    });
+
+    // Full sheet view toggle (loads only when requested)
+    let sheetShown = false;
+    $("toggleSheetBtn").addEventListener("click", () => {
+      const wrap = $("sheetWrap");
+      const frame = $("sheetFrame");
+
+      sheetShown = !sheetShown;
+      if (sheetShown) {
+        frame.src = FULL_SHEET_IFRAME;
+        wrap.style.display = "block";
+        $("toggleSheetBtn").textContent = "Hide full sheet view";
+      } else {
+        // unload to stop docs.google.com work
+        frame.src = "about:blank";
+        wrap.style.display = "none";
+        $("toggleSheetBtn").textContent = "Show full sheet view";
+      }
+    });
+
+    // Catch errors so they show on-page instead of freezing silently
+    window.addEventListener("error", (e) => showErr("JavaScript error:\n" + (e.message || e.error || e)));
+    window.addEventListener("unhandledrejection", (e) => showErr("Unhandled promise rejection:\n" + (e.reason?.message || e.reason || e)));
+
+    // Boot Google Charts, but do NOT auto-load data (prevents immediate heavy calls)
     google.charts.load("current", { packages: ["table"] });
     google.charts.setOnLoadCallback(() => {
-      init().catch(e => showError("Init failed:\n" + (e?.message || String(e))));
+      setStatus("Ready. Enter a Title filter and click Search.");
+      // Optional: uncomment this to load first page immediately (may be heavier):
+      // resetAndSearch();
     });
   </script>
 </body>
