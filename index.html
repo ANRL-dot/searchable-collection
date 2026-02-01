@@ -5,40 +5,45 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ANRL Library Collection Search</title>
 
+  <!-- DataTables 2 -->
   <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
+  <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
+
+  <!-- Google Charts loader (needed for google.visualization.Query) -->
+  <script src="https://www.gstatic.com/charts/loader.js"></script>
 
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
-    .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .controls { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
     label { font-weight: 600; }
     select, input[type="search"], button { padding: 8px; }
     #textSearch { flex: 1; min-width: 240px; }
-    .error { display:none; color:#b00020; margin: 8px 0; }
-    .hint { color:#444; font-size: 13px; margin: 6px 0 14px; }
+    #colFilter { min-width: 260px; }
+    #status { font-size: 13px; color:#444; margin: 6px 0 12px; }
+    #sheetError { display:none; color:#b00020; margin: 8px 0; white-space: pre-wrap; }
     .table-wrap { width: 100%; overflow-x: auto; }
     .section-title { font-weight: 700; margin: 18px 0 8px; }
     .iframe-wrap { width: 100%; height: 720px; }
     iframe { width: 100%; height: 100%; border: 0; }
   </style>
-
-  <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
 </head>
 
 <body>
   <div id="sheet-widget">
-    <div class="controls" id="filters"></div>
-
     <div class="controls">
+      <label for="colFilter">Title:</label>
+      <select id="colFilter">
+        <option value="">All</option>
+      </select>
+
       <label for="textSearch">Search:</label>
       <input id="textSearch" type="search" placeholder="Type to search all columns..." />
+
       <button id="clearBtn" type="button">Clear</button>
     </div>
 
-    <div class="hint">
-      If the table stays blank: Google Sheet must be shared as “Anyone with the link: Viewer”.
-    </div>
-
-    <div id="sheetError" class="error"></div>
+    <div id="status">Loading…</div>
+    <div id="sheetError"></div>
 
     <div class="table-wrap">
       <table id="sheetTable" class="display" style="width:100%"></table>
@@ -54,106 +59,113 @@
   </div>
 
   <script>
-    // =======================
-    // CONFIG (your values)
-    // =======================
-    const SHEET_ID = "1jg0uBKYypfpwCIa7AFel6m-2DWhkG7yDeD8YgWKj1N4";
-    const GID = "104159087";
-    const HEADERS = 1;
+    // =========================
+    // CONFIG
+    // =========================
 
-    // Add more dropdowns by adding column header names here:
-    // e.g. ["Title", "Author", "Year"]
-    const FILTER_COLUMNS = ["Title"];
+    // Use the PUBLISHED (2PACX...) form for maximum reliability
+    // (This avoids any “share link” mismatch vs what is published.)
+    const DATA_SOURCE_URL =
+      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/gviz/tq?gid=104159087&headers=1";
 
+    const FILTER_COL_NAME = "Title";  // must match the header text exactly
     const PAGE_LENGTH = 25;
 
-    // =======================
+    // =========================
     // Helpers
-    // =======================
+    // =========================
+    function setStatus(msg) {
+      document.getElementById("status").textContent = msg;
+    }
+
     function showError(msg) {
       const el = document.getElementById("sheetError");
       el.style.display = "block";
       el.textContent = msg;
+      setStatus("Error");
     }
 
     function escapeRegExp(str) {
       return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    // GViz JSON comes wrapped in a JS function call.
-    function extractGvizJson(text) {
-      const match = text.match(/google\\.visualization\\.Query\\.setResponse\\((.*)\\);/s);
-      if (!match || !match[1]) throw new Error("GViz response not in expected format.");
-      return JSON.parse(match[1]);
-    }
-
-    async function fetchSheetAsTable() {
-      // GViz endpoint for public sheets:
-      // https://docs.google.com/spreadsheets/d/{sheetId}/gviz/tq?... :contentReference[oaicite:2]{index=2}
-      const tq = encodeURIComponent("select *");
-      const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${GID}&headers=${HEADERS}&tqx=out:json&tq=${tq}`;
-
-      const res = await fetch(url, { cache: "no-store" });
-      const text = await res.text();
-
-      // If the sheet isn't public, Google often returns an HTML login/access page.
-      if (text.includes("<!DOCTYPE html") || text.toLowerCase().includes("signin")) {
-        throw new Error("Access blocked. Set Google Sheet sharing to “Anyone with the link: Viewer”.");
+    // =========================
+    // Main
+    // =========================
+    function build() {
+      if (typeof DataTable === "undefined") {
+        showError("DataTables failed to load.");
+        return;
       }
 
-      const json = extractGvizJson(text);
+      setStatus("Requesting data from Google Sheets…");
 
-      if (json.status !== "ok") {
-        throw new Error(json.errors?.[0]?.detailed_message || "GViz query failed.");
-      }
+      const query = new google.visualization.Query(DATA_SOURCE_URL);
+      query.setQuery("select *");
 
-      const cols = json.table.cols.map(c => (c.label && c.label.trim()) ? c.label : c.id);
-      const rows = json.table.rows.map(r =>
-        (r.c || []).map(cell => {
-          if (!cell) return "";
-          return (cell.f !== undefined && cell.f !== null) ? cell.f : (cell.v ?? "");
-        })
-      );
+      query.send((response) => {
+        if (response.isError()) {
+          showError(
+            "Google Visualization query error:\n" +
+            response.getMessage() + "\n" +
+            response.getDetailedMessage() + "\n\n" +
+            "Fixes to try:\n" +
+            "1) Google Sheet: File → Share → Publish to web (tab) and ensure it’s published.\n" +
+            "2) Google Sheet: Share → General access → Anyone with the link → Viewer.\n" +
+            "3) Confirm the gid matches the tab you want (gid=104159087)."
+          );
+          return;
+        }
 
-      return { cols, rows };
-    }
+        const dt = response.getDataTable();
+        const colCount = dt.getNumberOfColumns();
+        const rowCount = dt.getNumberOfRows();
 
-    function buildFilterUI(cols) {
-      const filtersDiv = document.getElementById("filters");
-      filtersDiv.innerHTML = "";
+        // Column labels
+        const colLabels = [];
+        const columns = [];
+        for (let c = 0; c < colCount; c++) {
+          const label = dt.getColumnLabel(c) || `Column ${c+1}`;
+          colLabels.push(label);
+          columns.push({ title: label });
+        }
 
-      const filterMeta = [];
+        // Identify filter column index
+        let filterColIndex = colLabels.indexOf(FILTER_COL_NAME);
+        if (filterColIndex === -1) {
+          filterColIndex = 0;
+          showError(`Filter column "${FILTER_COL_NAME}" not found in headers. Using first column instead.\nDetected headers:\n- ${colLabels.join("\n- ")}`);
+        } else {
+          // Clear any prior error
+          const el = document.getElementById("sheetError");
+          el.style.display = "none";
+          el.textContent = "";
+        }
 
-      for (const colName of FILTER_COLUMNS) {
-        const idx = cols.indexOf(colName);
-        if (idx === -1) continue;
+        // Data rows
+        const rows = [];
+        for (let r = 0; r < rowCount; r++) {
+          const row = [];
+          for (let c = 0; c < colCount; c++) row.push(dt.getValue(r, c));
+          rows.push(row);
+        }
 
-        const wrap = document.createElement("div");
-        wrap.style.display = "flex";
-        wrap.style.gap = "8px";
-        wrap.style.alignItems = "center";
+        // Build DataTable UI
+        const table = new DataTable("#sheetTable", {
+          data: rows,
+          columns: columns,
+          pageLength: PAGE_LENGTH,
+          deferRender: true
+        });
 
-        const label = document.createElement("label");
-        label.textContent = colName + ":";
-
-        const select = document.createElement("select");
+        // Populate dropdown from unique values in filter column
+        const select = document.getElementById("colFilter");
+        // Reset options (keeps All)
         select.innerHTML = `<option value="">All</option>`;
 
-        wrap.appendChild(label);
-        wrap.appendChild(select);
-        filtersDiv.appendChild(wrap);
-
-        filterMeta.push({ colName, idx, select });
-      }
-
-      return filterMeta;
-    }
-
-    function populateDropdowns(filterMeta, rows) {
-      for (const f of filterMeta) {
         const uniq = Array.from(new Set(
           rows
-            .map(r => r[f.idx])
+            .map(r => r[filterColIndex])
             .filter(v => v !== null && v !== undefined && String(v).trim() !== "")
             .map(String)
         )).sort((a,b) => a.localeCompare(b));
@@ -162,65 +174,40 @@
           const opt = document.createElement("option");
           opt.value = v;
           opt.textContent = v;
-          f.select.appendChild(opt);
-        }
-      }
-    }
-
-    // =======================
-    // Main
-    // =======================
-    (async function init() {
-      try {
-        if (typeof DataTable === "undefined") {
-          showError("DataTables failed to load.");
-          return;
+          select.appendChild(opt);
         }
 
-        const { cols, rows } = await fetchSheetAsTable();
-
-        const columns = cols.map(c => ({ title: c }));
-        const table = new DataTable("#sheetTable", {
-          data: rows,
-          columns,
-          pageLength: PAGE_LENGTH,
-          deferRender: true
+        // Dropdown exact match
+        select.addEventListener("change", () => {
+          const val = select.value;
+          if (!val) table.column(filterColIndex).search("").draw();
+          else table.column(filterColIndex).search(`^${escapeRegExp(val)}$`, true, false).draw();
         });
 
-        const filterMeta = buildFilterUI(cols);
-        if (filterMeta.length === 0 && FILTER_COLUMNS.length) {
-          showError(`Filter column(s) not found: ${FILTER_COLUMNS.join(", ")}. Check header names.`);
-        } else {
-          populateDropdowns(filterMeta, rows);
-
-          for (const f of filterMeta) {
-            f.select.addEventListener("change", () => {
-              const val = f.select.value;
-              if (!val) table.column(f.idx).search("").draw();
-              else table.column(f.idx).search(`^${escapeRegExp(val)}$`, true, false).draw();
-            });
-          }
-        }
-
+        // Global text search
         const search = document.getElementById("textSearch");
         search.addEventListener("input", () => table.search(search.value).draw());
 
+        // Clear
         document.getElementById("clearBtn").addEventListener("click", () => {
-          // Clear dropdowns
-          for (const f of filterMeta) f.select.value = "";
-          // Clear searches
-          table.search("");
-          if (filterMeta.length) {
-            for (const f of filterMeta) table.column(f.idx).search("");
-          }
+          select.value = "";
           search.value = "";
+          table.search("");
+          table.column(filterColIndex).search("");
           table.draw();
         });
 
-      } catch (e) {
-        showError(String(e && e.message ? e.message : e));
-      }
-    })();
+        setStatus(`Loaded ${rowCount.toLocaleString()} rows, ${colCount} columns.`);
+      });
+    }
+
+    // Load Google Charts (required for google.visualization.Query)
+    if (!window.google || !google.charts) {
+      showError("Google Charts loader did not initialize (blocked by network or browser).");
+    } else {
+      google.charts.load("current", { packages: ["table"] });
+      google.charts.setOnLoadCallback(build);
+    }
   </script>
 </body>
 </html>
