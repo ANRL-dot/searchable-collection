@@ -3,45 +3,46 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Library Collection Search</title>
+  <title>ANRL Library Collection Search</title>
 
-  <!-- DataTables (no jQuery needed) -->
   <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
 
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
     .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
     label { font-weight: 600; }
-    select, input[type="search"] { padding: 8px; }
-    #textSearch { flex: 1; min-width: 220px; }
-    #colFilter { min-width: 260px; }
-    #sheetError { display:none; color:#b00020; margin: 8px 0; }
-    .section-title { font-weight: 700; margin: 16px 0 8px; }
+    select, input[type="search"], button { padding: 8px; }
+    #textSearch { flex: 1; min-width: 240px; }
+    .error { display:none; color:#b00020; margin: 8px 0; }
+    .hint { color:#444; font-size: 13px; margin: 6px 0 14px; }
+    .table-wrap { width: 100%; overflow-x: auto; }
+    .section-title { font-weight: 700; margin: 18px 0 8px; }
     .iframe-wrap { width: 100%; height: 720px; }
     iframe { width: 100%; height: 100%; border: 0; }
   </style>
 
-  <!-- Google Charts loader (for querying Sheets via gviz) -->
-  <script src="https://www.gstatic.com/charts/loader.js"></script>
-
-  <!-- DataTables JS -->
   <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
 </head>
 
 <body>
   <div id="sheet-widget">
-    <div class="controls">
-      <label for="colFilter">Title:</label>
-      <select id="colFilter">
-        <option value="">All</option>
-      </select>
+    <div class="controls" id="filters"></div>
 
-      <input id="textSearch" type="search" placeholder="Type to search..." />
+    <div class="controls">
+      <label for="textSearch">Search:</label>
+      <input id="textSearch" type="search" placeholder="Type to search all columns..." />
+      <button id="clearBtn" type="button">Clear</button>
     </div>
 
-    <div id="sheetError"></div>
+    <div class="hint">
+      If the table stays blank: Google Sheet must be shared as “Anyone with the link: Viewer”.
+    </div>
 
-    <table id="sheetTable" class="display" style="width:100%"></table>
+    <div id="sheetError" class="error"></div>
+
+    <div class="table-wrap">
+      <table id="sheetTable" class="display" style="width:100%"></table>
+    </div>
 
     <div class="section-title">Full Sheet View</div>
     <div class="iframe-wrap">
@@ -53,14 +54,22 @@
   </div>
 
   <script>
-    // ============ CONFIG ============
+    // =======================
+    // CONFIG (your values)
+    // =======================
     const SHEET_ID = "1jg0uBKYypfpwCIa7AFel6m-2DWhkG7yDeD8YgWKj1N4";
     const GID = "104159087";
-    const HEADERS = 1;                 // header rows
-    const FILTER_COL_NAME = "Title";   // must match header exactly
-    const PAGE_LENGTH = 25;
-    // ================================
+    const HEADERS = 1;
 
+    // Add more dropdowns by adding column header names here:
+    // e.g. ["Title", "Author", "Year"]
+    const FILTER_COLUMNS = ["Title"];
+
+    const PAGE_LENGTH = 25;
+
+    // =======================
+    // Helpers
+    // =======================
     function showError(msg) {
       const el = document.getElementById("sheetError");
       el.style.display = "block";
@@ -71,44 +80,106 @@
       return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    function startWidget() {
-      const tq = encodeURIComponent("select *");
-      const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${GID}&headers=${HEADERS}&tq=${tq}`;
+    // GViz JSON comes wrapped in a JS function call.
+    function extractGvizJson(text) {
+      const match = text.match(/google\\.visualization\\.Query\\.setResponse\\((.*)\\);/s);
+      if (!match || !match[1]) throw new Error("GViz response not in expected format.");
+      return JSON.parse(match[1]);
+    }
 
-      const query = new google.visualization.Query(url);
-      query.send((response) => {
-        if (response.isError()) {
-          showError(`Google Sheets query error: ${response.getMessage()} ${response.getDetailedMessage()}`);
+    async function fetchSheetAsTable() {
+      // GViz endpoint for public sheets:
+      // https://docs.google.com/spreadsheets/d/{sheetId}/gviz/tq?... :contentReference[oaicite:2]{index=2}
+      const tq = encodeURIComponent("select *");
+      const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${GID}&headers=${HEADERS}&tqx=out:json&tq=${tq}`;
+
+      const res = await fetch(url, { cache: "no-store" });
+      const text = await res.text();
+
+      // If the sheet isn't public, Google often returns an HTML login/access page.
+      if (text.includes("<!DOCTYPE html") || text.toLowerCase().includes("signin")) {
+        throw new Error("Access blocked. Set Google Sheet sharing to “Anyone with the link: Viewer”.");
+      }
+
+      const json = extractGvizJson(text);
+
+      if (json.status !== "ok") {
+        throw new Error(json.errors?.[0]?.detailed_message || "GViz query failed.");
+      }
+
+      const cols = json.table.cols.map(c => (c.label && c.label.trim()) ? c.label : c.id);
+      const rows = json.table.rows.map(r =>
+        (r.c || []).map(cell => {
+          if (!cell) return "";
+          return (cell.f !== undefined && cell.f !== null) ? cell.f : (cell.v ?? "");
+        })
+      );
+
+      return { cols, rows };
+    }
+
+    function buildFilterUI(cols) {
+      const filtersDiv = document.getElementById("filters");
+      filtersDiv.innerHTML = "";
+
+      const filterMeta = [];
+
+      for (const colName of FILTER_COLUMNS) {
+        const idx = cols.indexOf(colName);
+        if (idx === -1) continue;
+
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex";
+        wrap.style.gap = "8px";
+        wrap.style.alignItems = "center";
+
+        const label = document.createElement("label");
+        label.textContent = colName + ":";
+
+        const select = document.createElement("select");
+        select.innerHTML = `<option value="">All</option>`;
+
+        wrap.appendChild(label);
+        wrap.appendChild(select);
+        filtersDiv.appendChild(wrap);
+
+        filterMeta.push({ colName, idx, select });
+      }
+
+      return filterMeta;
+    }
+
+    function populateDropdowns(filterMeta, rows) {
+      for (const f of filterMeta) {
+        const uniq = Array.from(new Set(
+          rows
+            .map(r => r[f.idx])
+            .filter(v => v !== null && v !== undefined && String(v).trim() !== "")
+            .map(String)
+        )).sort((a,b) => a.localeCompare(b));
+
+        for (const v of uniq) {
+          const opt = document.createElement("option");
+          opt.value = v;
+          opt.textContent = v;
+          f.select.appendChild(opt);
+        }
+      }
+    }
+
+    // =======================
+    // Main
+    // =======================
+    (async function init() {
+      try {
+        if (typeof DataTable === "undefined") {
+          showError("DataTables failed to load.");
           return;
         }
 
-        const dt = response.getDataTable();
-        const colCount = dt.getNumberOfColumns();
-        const rowCount = dt.getNumberOfRows();
+        const { cols, rows } = await fetchSheetAsTable();
 
-        const columns = [];
-        const colLabels = [];
-        for (let c = 0; c < colCount; c++) {
-          const label = dt.getColumnLabel(c) || `Column ${c + 1}`;
-          colLabels.push(label);
-          columns.push({ title: label });
-        }
-
-        let filterColIndex = 0;
-        if (FILTER_COL_NAME && colLabels.includes(FILTER_COL_NAME)) {
-          filterColIndex = colLabels.indexOf(FILTER_COL_NAME);
-        } else if (FILTER_COL_NAME) {
-          showError(`Filter column "${FILTER_COL_NAME}" not found. Using first column instead.`);
-        }
-
-        const rows = [];
-        for (let r = 0; r < rowCount; r++) {
-          const row = [];
-          for (let c = 0; c < colCount; c++) row.push(dt.getValue(r, c));
-          rows.push(row);
-        }
-
-        // Build DataTable
+        const columns = cols.map(c => ({ title: c }));
         const table = new DataTable("#sheetTable", {
           data: rows,
           columns,
@@ -116,53 +187,40 @@
           deferRender: true
         });
 
-        // Build dropdown options from unique Title values
-        const select = document.getElementById("colFilter");
-        const uniq = Array.from(new Set(
-          rows
-            .map(r => r[filterColIndex])
-            .filter(v => v !== null && v !== undefined && String(v).trim() !== "")
-            .map(String)
-        )).sort((a, b) => a.localeCompare(b));
+        const filterMeta = buildFilterUI(cols);
+        if (filterMeta.length === 0 && FILTER_COLUMNS.length) {
+          showError(`Filter column(s) not found: ${FILTER_COLUMNS.join(", ")}. Check header names.`);
+        } else {
+          populateDropdowns(filterMeta, rows);
 
-        for (const v of uniq) {
-          const opt = document.createElement("option");
-          opt.value = v;
-          opt.textContent = v;
-          select.appendChild(opt);
-        }
-
-        // Dropdown exact-match filter on Title
-        select.addEventListener("change", () => {
-          const val = select.value;
-          if (!val) {
-            table.column(filterColIndex).search("").draw();
-          } else {
-            table.column(filterColIndex).search(`^${escapeRegExp(val)}$`, true, false).draw();
+          for (const f of filterMeta) {
+            f.select.addEventListener("change", () => {
+              const val = f.select.value;
+              if (!val) table.column(f.idx).search("").draw();
+              else table.column(f.idx).search(`^${escapeRegExp(val)}$`, true, false).draw();
+            });
           }
-        });
-
-        // Text search across all columns
-        const search = document.getElementById("textSearch");
-        search.addEventListener("input", () => {
-          table.search(search.value).draw();
-        });
-      });
-    }
-
-    // Init
-    if (!window.google || !google.charts) {
-      showError("Google Charts failed to load (blocked by host or network).");
-    } else {
-      google.charts.load("current", { packages: ["table"] });
-      google.charts.setOnLoadCallback(() => {
-        if (typeof DataTable === "undefined") {
-          showError("DataTables failed to load (blocked by host or network).");
-          return;
         }
-        startWidget();
-      });
-    }
+
+        const search = document.getElementById("textSearch");
+        search.addEventListener("input", () => table.search(search.value).draw());
+
+        document.getElementById("clearBtn").addEventListener("click", () => {
+          // Clear dropdowns
+          for (const f of filterMeta) f.select.value = "";
+          // Clear searches
+          table.search("");
+          if (filterMeta.length) {
+            for (const f of filterMeta) table.column(f.idx).search("");
+          }
+          search.value = "";
+          table.draw();
+        });
+
+      } catch (e) {
+        showError(String(e && e.message ? e.message : e));
+      }
+    })();
   </script>
 </body>
 </html>
