@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
   <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
 
-  <!-- Google Charts loader (needed for google.visualization.Query) -->
+  <!-- Google Charts loader (required for google.visualization.Query) -->
   <script src="https://www.gstatic.com/charts/loader.js"></script>
 
   <style>
@@ -39,6 +39,7 @@
       <label for="textSearch">Search:</label>
       <input id="textSearch" type="search" placeholder="Type to search all columns..." />
 
+      <button id="searchBtn" type="button">Search</button>
       <button id="clearBtn" type="button">Clear</button>
     </div>
 
@@ -62,17 +63,14 @@
     // =========================
     // CONFIG
     // =========================
-
-    // Use the PUBLISHED (2PACX...) form for maximum reliability
-    // (This avoids any “share link” mismatch vs what is published.)
     const DATA_SOURCE_URL =
       "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/gviz/tq?gid=104159087&headers=1";
 
-    const FILTER_COL_NAME = "Title";  // must match the header text exactly
+    const FILTER_COL_NAME = "Title";  // must match header text exactly
     const PAGE_LENGTH = 25;
 
     // =========================
-    // Helpers
+    // UI helpers
     // =========================
     function setStatus(msg) {
       document.getElementById("status").textContent = msg;
@@ -85,129 +83,173 @@
       setStatus("Error");
     }
 
+    function clearError() {
+      const el = document.getElementById("sheetError");
+      el.style.display = "none";
+      el.textContent = "";
+    }
+
     function escapeRegExp(str) {
       return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
+
+    // Catch any JS errors so it doesn't silently hang on "Loading…"
+    window.addEventListener("error", (e) => {
+      showError("JavaScript error:\n" + (e.message || e.error || e));
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      showError("Unhandled promise rejection:\n" + (e.reason ? (e.reason.message || e.reason) : e));
+    });
 
     // =========================
     // Main
     // =========================
     function build() {
-      if (typeof DataTable === "undefined") {
-        showError("DataTables failed to load.");
-        return;
-      }
-
-      setStatus("Requesting data from Google Sheets…");
-
-      const query = new google.visualization.Query(DATA_SOURCE_URL);
-      query.setQuery("select *");
-
-      query.send((response) => {
-        if (response.isError()) {
-          showError(
-            "Google Visualization query error:\n" +
-            response.getMessage() + "\n" +
-            response.getDetailedMessage() + "\n\n" +
-            "Fixes to try:\n" +
-            "1) Google Sheet: File → Share → Publish to web (tab) and ensure it’s published.\n" +
-            "2) Google Sheet: Share → General access → Anyone with the link → Viewer.\n" +
-            "3) Confirm the gid matches the tab you want (gid=104159087)."
-          );
+      try {
+        // Verify libs
+        if (typeof DataTable === "undefined") {
+          showError("DataTables did not load (DataTable is undefined).");
+          return;
+        }
+        if (!google || !google.visualization || !google.visualization.Query) {
+          showError("Google Visualization API did not load (google.visualization.Query is missing).");
           return;
         }
 
-        const dt = response.getDataTable();
-        const colCount = dt.getNumberOfColumns();
-        const rowCount = dt.getNumberOfRows();
+        setStatus("Requesting data from Google Sheets…");
 
-        // Column labels
-        const colLabels = [];
-        const columns = [];
-        for (let c = 0; c < colCount; c++) {
-          const label = dt.getColumnLabel(c) || `Column ${c+1}`;
-          colLabels.push(label);
-          columns.push({ title: label });
-        }
+        const query = new google.visualization.Query(DATA_SOURCE_URL);
+        query.setQuery("select *");
 
-        // Identify filter column index
-        let filterColIndex = colLabels.indexOf(FILTER_COL_NAME);
-        if (filterColIndex === -1) {
-          filterColIndex = 0;
-          showError(`Filter column "${FILTER_COL_NAME}" not found in headers. Using first column instead.\nDetected headers:\n- ${colLabels.join("\n- ")}`);
-        } else {
-          // Clear any prior error
-          const el = document.getElementById("sheetError");
-          el.style.display = "none";
-          el.textContent = "";
-        }
+        query.send((response) => {
+          try {
+            if (response.isError()) {
+              showError(
+                "Google Visualization query error:\n" +
+                response.getMessage() + "\n" +
+                response.getDetailedMessage()
+              );
+              return;
+            }
 
-        // Data rows
-        const rows = [];
-        for (let r = 0; r < rowCount; r++) {
-          const row = [];
-          for (let c = 0; c < colCount; c++) row.push(dt.getValue(r, c));
-          rows.push(row);
-        }
+            const dt = response.getDataTable();
+            const colCount = dt.getNumberOfColumns();
+            const rowCount = dt.getNumberOfRows();
 
-        // Build DataTable UI
-        const table = new DataTable("#sheetTable", {
-          data: rows,
-          columns: columns,
-          pageLength: PAGE_LENGTH,
-          deferRender: true
+            const colLabels = [];
+            const columns = [];
+            for (let c = 0; c < colCount; c++) {
+              const label = dt.getColumnLabel(c) || `Column ${c+1}`;
+              colLabels.push(label);
+              columns.push({ title: label });
+            }
+
+            let filterColIndex = colLabels.indexOf(FILTER_COL_NAME);
+            if (filterColIndex === -1) {
+              filterColIndex = 0;
+              showError(
+                `Filter column "${FILTER_COL_NAME}" not found. Using first column instead.\n\n` +
+                "Detected headers:\n- " + colLabels.join("\n- ")
+              );
+            } else {
+              clearError();
+            }
+
+            const rows = [];
+            for (let r = 0; r < rowCount; r++) {
+              const row = [];
+              for (let c = 0; c < colCount; c++) row.push(dt.getValue(r, c));
+              rows.push(row);
+            }
+
+            // Create table
+            const table = new DataTable("#sheetTable", {
+              data: rows,
+              columns: columns,
+              pageLength: PAGE_LENGTH,
+              deferRender: true
+            });
+
+            // Populate Title dropdown
+            const select = document.getElementById("colFilter");
+            select.innerHTML = `<option value="">All</option>`;
+
+            const uniq = Array.from(new Set(
+              rows
+                .map(r => r[filterColIndex])
+                .filter(v => v !== null && v !== undefined && String(v).trim() !== "")
+                .map(String)
+            )).sort((a,b) => a.localeCompare(b));
+
+            for (const v of uniq) {
+              const opt = document.createElement("option");
+              opt.value = v;
+              opt.textContent = v;
+              select.appendChild(opt);
+            }
+
+            // Filtering behavior
+            select.addEventListener("change", () => {
+              const val = select.value;
+              if (!val) table.column(filterColIndex).search("").draw();
+              else table.column(filterColIndex).search(`^${escapeRegExp(val)}$`, true, false).draw();
+            });
+
+            // Search behavior (Enter + button + typing)
+            const search = document.getElementById("textSearch");
+            const runSearch = () => table.search(search.value).draw();
+
+            search.addEventListener("input", runSearch);
+            search.addEventListener("keydown", (e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                runSearch();
+              }
+            });
+            document.getElementById("searchBtn").addEventListener("click", runSearch);
+
+            // Clear
+            document.getElementById("clearBtn").addEventListener("click", () => {
+              select.value = "";
+              search.value = "";
+              table.search("");
+              table.column(filterColIndex).search("");
+              table.draw();
+            });
+
+            setStatus(`Loaded ${rowCount.toLocaleString()} rows, ${colCount} columns.`);
+          } catch (err) {
+            showError("Callback error:\n" + (err && err.message ? err.message : String(err)));
+          }
         });
-
-        // Populate dropdown from unique values in filter column
-        const select = document.getElementById("colFilter");
-        // Reset options (keeps All)
-        select.innerHTML = `<option value="">All</option>`;
-
-        const uniq = Array.from(new Set(
-          rows
-            .map(r => r[filterColIndex])
-            .filter(v => v !== null && v !== undefined && String(v).trim() !== "")
-            .map(String)
-        )).sort((a,b) => a.localeCompare(b));
-
-        for (const v of uniq) {
-          const opt = document.createElement("option");
-          opt.value = v;
-          opt.textContent = v;
-          select.appendChild(opt);
-        }
-
-        // Dropdown exact match
-        select.addEventListener("change", () => {
-          const val = select.value;
-          if (!val) table.column(filterColIndex).search("").draw();
-          else table.column(filterColIndex).search(`^${escapeRegExp(val)}$`, true, false).draw();
-        });
-
-        // Global text search
-        const search = document.getElementById("textSearch");
-        search.addEventListener("input", () => table.search(search.value).draw());
-
-        // Clear
-        document.getElementById("clearBtn").addEventListener("click", () => {
-          select.value = "";
-          search.value = "";
-          table.search("");
-          table.column(filterColIndex).search("");
-          table.draw();
-        });
-
-        setStatus(`Loaded ${rowCount.toLocaleString()} rows, ${colCount} columns.`);
-      });
+      } catch (err) {
+        showError("Build error:\n" + (err && err.message ? err.message : String(err)));
+      }
     }
 
-    // Load Google Charts (required for google.visualization.Query)
-    if (!window.google || !google.charts) {
-      showError("Google Charts loader did not initialize (blocked by network or browser).");
-    } else {
-      google.charts.load("current", { packages: ["table"] });
-      google.charts.setOnLoadCallback(build);
-    }
+    // If Google Charts never finishes loading, stop the "Loading…" spinner and show a message.
+    const loadTimeout = setTimeout(() => {
+      if (document.getElementById("status").textContent.includes("Loading")) {
+        showError("Timed out waiting for Google Charts to initialize.\nIf this persists, a browser extension/network policy may be blocking https://www.gstatic.com/charts/loader.js");
+      }
+    }, 8000);
+
+    // Load Google Charts
+    document.addEventListener("DOMContentLoaded", () => {
+      try {
+        if (!window.google || !google.charts) {
+          showError("Google Charts loader not available (loader.js did not load).");
+          return;
+        }
+        google.charts.load("current", { packages: ["table"] });
+        google.charts.setOnLoadCallback(() => {
+          clearTimeout(loadTimeout);
+          build();
+        });
+      } catch (err) {
+        showError("Init error:\n" + (err && err.message ? err.message : String(err)));
+      }
+    });
   </script>
 </body>
 </html>
