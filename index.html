@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ANRL Library Collection Search</title>
 
-  <!-- DataTables (table UI) -->
   <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
   <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
 
@@ -20,6 +19,7 @@
     .btnrow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin: 10px 0 14px; }
     .table-wrap { width: 100%; overflow-x: auto; }
     .muted { color:#666; font-size: 12px; }
+    a.smalllink { font-size:12px; color:#1a73e8; text-decoration: underline; }
     .sheet-wrap { margin-top: 16px; display:none; }
     .sheet-frame { width:100%; height:720px; border:0; }
   </style>
@@ -59,6 +59,7 @@
     <button id="nextBtn" type="button" disabled>Next</button>
     <span class="muted" id="pageInfo">Page 1</span>
     <button id="toggleSheetBtn" type="button">Show full sheet view</button>
+    <a id="testLink" class="smalllink" target="_blank" rel="noopener">Test data connection (CSV)</a>
   </div>
 
   <div id="status">Ready. Enter a filter and click Search.</div>
@@ -76,18 +77,24 @@
     // =========================
     // CONFIG
     // =========================
-    // Published sheet (2PACX...) base:
-    const GVIZ_BASE =
-      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/gviz/tq";
+    const SHEET_ID = "1jg0uBKYypfpwCIa7AFel6m-2DWhkG7yDeD8YgWKj1N4";
+    const PUBLISHED_KEY =
+      "2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l";
 
     const GID = "104159087";
     const HEADERS = 1;
-    const TITLE_HEADER = "Title"; // must match your sheet header exactly
+    const TITLE_HEADER = "Title"; // must match sheet header exactly
+
+    // Try published first, then fallback to /d/{SHEET_ID}/...
+    const GVIZ_BASES = [
+      `https://docs.google.com/spreadsheets/d/e/${PUBLISHED_KEY}/gviz/tq`,
+      `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq`
+    ];
 
     const FULL_SHEET_IFRAME =
-      "https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/pubhtml?gid=104159087&single=true&widget=true&headers=false";
-    // =========================
+      `https://docs.google.com/spreadsheets/d/e/${PUBLISHED_KEY}/pubhtml?gid=${GID}&single=true&widget=true&headers=false`;
 
+    // =========================
     const $ = (id) => document.getElementById(id);
     const statusEl = $("status");
     const errEl = $("err");
@@ -110,17 +117,27 @@
       return s;
     }
 
-    // -------------------------
-    // GViz JSONP (no CORS)
-    // -------------------------
-    function gvizJsonpQuery(tq) {
+    // =========================
+    // GViz JSONP with REAL error reporting
+    // =========================
+    function gvizJsonpQuery(baseUrl, tq) {
       return new Promise((resolve, reject) => {
         const cb = "__gviz_cb_" + Math.random().toString(36).slice(2);
         const script = document.createElement("script");
+        script.async = true;
+
+        const tqx = `responseHandler:${cb}`; // JSONP callback
+        const url =
+          `${baseUrl}?gid=${encodeURIComponent(GID)}&headers=${encodeURIComponent(HEADERS)}` +
+          `&tq=${encodeURIComponent(tq)}&tqx=${encodeURIComponent(tqx)}`;
 
         const timeout = setTimeout(() => {
           cleanup();
-          reject(new Error("GViz request timed out."));
+          reject(new Error(
+            "GViz request timed out.\n" +
+            "This is usually caused by a blocker or network policy preventing docs.google.com from responding.\n" +
+            "Test URL:\n" + url
+          ));
         }, 15000);
 
         function cleanup() {
@@ -129,34 +146,51 @@
           if (script && script.parentNode) script.parentNode.removeChild(script);
         }
 
+        // IMPORTANT: handle script load failure explicitly
+        script.onerror = () => {
+          cleanup();
+          reject(new Error(
+            "GViz script failed to load.\n" +
+            "Most common causes:\n" +
+            "• Ad blocker / privacy extension blocking docs.google.com\n" +
+            "• Corporate network / DNS filtering\n" +
+            "• Browser setting blocking third-party scripts\n\n" +
+            "Try incognito with extensions OFF, or whitelist docs.google.com.\n\n" +
+            "Blocked URL:\n" + url
+          ));
+        };
+
         window[cb] = (resp) => {
           cleanup();
-          // resp.status: "ok" | "error"
           if (!resp || resp.status !== "ok") {
             const e = (resp && resp.errors && resp.errors[0]) ? resp.errors[0] : null;
-            const msg = e
-              ? (e.detailed_message || e.message || JSON.stringify(e))
-              : "Unknown GViz error response.";
-            reject(new Error(msg));
+            const msg = e ? (e.detailed_message || e.message || JSON.stringify(e)) : "Unknown GViz error response.";
+            reject(new Error("GViz returned an error:\n" + msg));
             return;
           }
           resolve(resp.table);
         };
 
-        const tqx = encodeURIComponent("out:json;responseHandler:" + cb);
-        const url =
-          `${GVIZ_BASE}?gid=${encodeURIComponent(GID)}&headers=${encodeURIComponent(HEADERS)}` +
-          `&tq=${encodeURIComponent(tq)}&tqx=${tqx}`;
-
         script.src = url;
-        // If load fails entirely (blocked), you'll get no callback -> timeout will fire
         document.head.appendChild(script);
       });
     }
 
-    // -------------------------
+    async function gvizQueryWithFallback(tq) {
+      let lastErr = null;
+      for (const base of GVIZ_BASES) {
+        try {
+          return await gvizJsonpQuery(base, tq);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error("All GViz endpoints failed.");
+    }
+
+    // =========================
     // Paging/filter state
-    // -------------------------
+    // =========================
     let schema = null;   // { labels[], titleIdx, titleColLetter }
     let offset = 0;
     let pageSize = Number($("size").value);
@@ -168,8 +202,7 @@
       if (schema) return schema;
 
       setStatus("Loading columns…");
-      // limit 0: just schema
-      const t = await gvizJsonpQuery("select * limit 0");
+      const t = await gvizQueryWithFallback("select * limit 0");
 
       const labels = (t.cols || []).map((c, i) => (c.label && c.label.trim()) ? c.label : ("Column " + (i+1)));
       const titleIdx = labels.indexOf(TITLE_HEADER);
@@ -191,18 +224,11 @@
       const L = schema.titleColLetter;
 
       if (starts) {
-        if (starts === "0-9") {
-          parts.push(`${L} matches '^[0-9]'`);
-        } else {
-          const ch = escapeQuotes(starts.toLowerCase());
-          parts.push(`lower(${L}) matches '^${ch}'`);
-        }
+        if (starts === "0-9") parts.push(`${L} matches '^[0-9]'`);
+        else parts.push(`lower(${L}) matches '^${escapeQuotes(starts.toLowerCase())}'`);
       }
 
-      if (term) {
-        const t = escapeQuotes(term.toLowerCase());
-        parts.push(`lower(${L}) contains '${t}'`);
-      }
+      if (term) parts.push(`lower(${L}) contains '${escapeQuotes(term.toLowerCase())}'`);
 
       return parts.length ? (" where " + parts.join(" and ")) : "";
     }
@@ -212,7 +238,6 @@
       const row = new Array(colCount);
       for (let i = 0; i < colCount; i++) {
         const cell = cells[i];
-        // prefer formatted value
         row[i] = cell ? (cell.f ?? cell.v ?? "") : "";
       }
       return row;
@@ -225,13 +250,12 @@
 
         await loadSchemaOnce();
 
-        // stable paging: always order by Title
         const L = schema.titleColLetter;
         const where = buildWhereClause();
         const tq = `select *${where} order by ${L} asc limit ${pageSize} offset ${offset}`;
 
         setStatus("Loading page…");
-        const t = await gvizJsonpQuery(tq);
+        const t = await gvizQueryWithFallback(tq);
 
         const colCount = (t.cols || []).length;
         const rows = (t.rows || []).map(r => toRowArray(r, colCount));
@@ -244,8 +268,8 @@
             data: rows,
             columns,
             pageLength: pageSize,
-            searching: false,  // search happens via GViz query
-            ordering: true,    // sorts within the current page only
+            searching: false,
+            ordering: true,
             deferRender: true
           });
         } else {
@@ -273,9 +297,9 @@
       loadPage();
     }
 
-    // -------------------------
+    // =========================
     // UI wiring
-    // -------------------------
+    // =========================
     $("searchBtn").addEventListener("click", resetAndSearch);
     $("term").addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); resetAndSearch(); }
@@ -303,13 +327,12 @@
       loadPage();
     });
 
-    // Full sheet toggle: load only on demand, unload when hidden
     let sheetShown = false;
     $("toggleSheetBtn").addEventListener("click", () => {
       const wrap = $("sheetWrap");
       const frame = $("sheetFrame");
-
       sheetShown = !sheetShown;
+
       if (sheetShown) {
         frame.src = FULL_SHEET_IFRAME;
         wrap.style.display = "block";
@@ -321,8 +344,14 @@
       }
     });
 
-    // Do not auto-load; avoids any immediate heavy work
-    setStatus("Ready. Enter a Title filter and click Search.");
+    // Build a CSV “test” URL (opens quickly and proves access)
+    (function setTestLink(){
+      const tq = "select * limit 1";
+      const testUrl = `${GVIZ_BASES[0]}?gid=${encodeURIComponent(GID)}&headers=${encodeURIComponent(HEADERS)}&tq=${encodeURIComponent(tq)}&tqx=${encodeURIComponent("out:csv")}`;
+      $("testLink").href = testUrl;
+    })();
+
+    setStatus("Ready. Enter a filter and click Search.");
   </script>
 </body>
 </html>
