@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Library Collection Search</title>
+
+  <!-- DataTables (no jQuery needed) -->
+  <link rel="stylesheet" href="https://cdn.datatables.net/2.3.6/css/dataTables.dataTables.min.css">
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
+    .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    label { font-weight: 600; }
+    select, input[type="search"] { padding: 8px; }
+    #textSearch { flex: 1; min-width: 220px; }
+    #colFilter { min-width: 260px; }
+    #sheetError { display:none; color:#b00020; margin: 8px 0; }
+    .section-title { font-weight: 700; margin: 16px 0 8px; }
+    .iframe-wrap { width: 100%; height: 720px; }
+    iframe { width: 100%; height: 100%; border: 0; }
+  </style>
+
+  <!-- Google Charts loader (for querying Sheets via gviz) -->
+  <script src="https://www.gstatic.com/charts/loader.js"></script>
+
+  <!-- DataTables JS -->
+  <script src="https://cdn.datatables.net/2.3.6/js/dataTables.min.js"></script>
+</head>
+
+<body>
+  <div id="sheet-widget">
+    <div class="controls">
+      <label for="colFilter">Title:</label>
+      <select id="colFilter">
+        <option value="">All</option>
+      </select>
+
+      <input id="textSearch" type="search" placeholder="Type to search..." />
+    </div>
+
+    <div id="sheetError"></div>
+
+    <table id="sheetTable" class="display" style="width:100%"></table>
+
+    <div class="section-title">Full Sheet View</div>
+    <div class="iframe-wrap">
+      <iframe
+        loading="lazy"
+        src="https://docs.google.com/spreadsheets/d/e/2PACX-1vTGi_JcID6t3FbeF_-Ly4Q-0SBY6jMco19PK8hNcNGO28VheQDFXAgdvUB73Yr7bM9SoWSCXrgJK9-l/pubhtml?gid=104159087&single=true&widget=true&headers=false">
+      </iframe>
+    </div>
+  </div>
+
+  <script>
+    // ============ CONFIG ============
+    const SHEET_ID = "1jg0uBKYypfpwCIa7AFel6m-2DWhkG7yDeD8YgWKj1N4";
+    const GID = "104159087";
+    const HEADERS = 1;                 // header rows
+    const FILTER_COL_NAME = "Title";   // must match header exactly
+    const PAGE_LENGTH = 25;
+    // ================================
+
+    function showError(msg) {
+      const el = document.getElementById("sheetError");
+      el.style.display = "block";
+      el.textContent = msg;
+    }
+
+    function escapeRegExp(str) {
+      return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function startWidget() {
+      const tq = encodeURIComponent("select *");
+      const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${GID}&headers=${HEADERS}&tq=${tq}`;
+
+      const query = new google.visualization.Query(url);
+      query.send((response) => {
+        if (response.isError()) {
+          showError(`Google Sheets query error: ${response.getMessage()} ${response.getDetailedMessage()}`);
+          return;
+        }
+
+        const dt = response.getDataTable();
+        const colCount = dt.getNumberOfColumns();
+        const rowCount = dt.getNumberOfRows();
+
+        const columns = [];
+        const colLabels = [];
+        for (let c = 0; c < colCount; c++) {
+          const label = dt.getColumnLabel(c) || `Column ${c + 1}`;
+          colLabels.push(label);
+          columns.push({ title: label });
+        }
+
+        let filterColIndex = 0;
+        if (FILTER_COL_NAME && colLabels.includes(FILTER_COL_NAME)) {
+          filterColIndex = colLabels.indexOf(FILTER_COL_NAME);
+        } else if (FILTER_COL_NAME) {
+          showError(`Filter column "${FILTER_COL_NAME}" not found. Using first column instead.`);
+        }
+
+        const rows = [];
+        for (let r = 0; r < rowCount; r++) {
+          const row = [];
+          for (let c = 0; c < colCount; c++) row.push(dt.getValue(r, c));
+          rows.push(row);
+        }
+
+        // Build DataTable
+        const table = new DataTable("#sheetTable", {
+          data: rows,
+          columns,
+          pageLength: PAGE_LENGTH,
+          deferRender: true
+        });
+
+        // Build dropdown options from unique Title values
+        const select = document.getElementById("colFilter");
+        const uniq = Array.from(new Set(
+          rows
+            .map(r => r[filterColIndex])
+            .filter(v => v !== null && v !== undefined && String(v).trim() !== "")
+            .map(String)
+        )).sort((a, b) => a.localeCompare(b));
+
+        for (const v of uniq) {
+          const opt = document.createElement("option");
+          opt.value = v;
+          opt.textContent = v;
+          select.appendChild(opt);
+        }
+
+        // Dropdown exact-match filter on Title
+        select.addEventListener("change", () => {
+          const val = select.value;
+          if (!val) {
+            table.column(filterColIndex).search("").draw();
+          } else {
+            table.column(filterColIndex).search(`^${escapeRegExp(val)}$`, true, false).draw();
+          }
+        });
+
+        // Text search across all columns
+        const search = document.getElementById("textSearch");
+        search.addEventListener("input", () => {
+          table.search(search.value).draw();
+        });
+      });
+    }
+
+    // Init
+    if (!window.google || !google.charts) {
+      showError("Google Charts failed to load (blocked by host or network).");
+    } else {
+      google.charts.load("current", { packages: ["table"] });
+      google.charts.setOnLoadCallback(() => {
+        if (typeof DataTable === "undefined") {
+          showError("DataTables failed to load (blocked by host or network).");
+          return;
+        }
+        startWidget();
+      });
+    }
+  </script>
+</body>
+</html>
