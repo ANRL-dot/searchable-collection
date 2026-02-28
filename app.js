@@ -1,17 +1,15 @@
 /* Client UI (JSONP) for Large Sheet Search + cursor paging
- * - Does NOT download entire sheet
- * - Uses Apps Script web app as the data source
- * - Search stays responsive (server scans until it finds a page of matches)
- * - Prev/Next uses cursor history
+ * Web app: https://script.google.com/macros/s/AKfycbwjiSb6SWatGt3BInPpzFlW24vhoSmH9ClIozVzhioXUC3aQy7vsJ8Z4Qhk_Iqz0zXj/exec
+ *
+ * Requirements in index.html:
+ *   #q, #clear, #count, #status, #err, #tbl thead/tbody
  */
 
 (() => {
-  // ==== CONFIG ====
   const API_URL =
-    "https://script.google.com/macros/s/AKfycbzB-8NNBvX9-KAqNzmOpPMPeJBPsrk6kA7cDEm-hFq5T_eiqp7AdviTTzeC53UwcrYh/exec";
+    "https://script.google.com/macros/s/AKfycbwjiSb6SWatGt3BInPpzFlW24vhoSmH9ClIozVzhioXUC3aQy7vsJ8Z4Qhk_Iqz0zXj/exec";
   const DEFAULT_PAGE_SIZE = 200;
 
-  // ==== DOM (required) ====
   const elQ = document.getElementById("q");
   const elClear = document.getElementById("clear");
   const elCount = document.getElementById("count");
@@ -25,7 +23,7 @@
     return;
   }
 
-  // ==== Pager UI (auto) ====
+  // Pager UI
   const pager = document.createElement("div");
   pager.style.display = "flex";
   pager.style.gap = "8px";
@@ -67,14 +65,13 @@
 
   elStatus.parentNode.insertBefore(pager, elStatus.nextSibling);
 
-  // ==== State ====
+  // State
   let headers = [];
   let q = "";
   let pageSize = DEFAULT_PAGE_SIZE;
 
   // Cursor paging
-  // history[0] is cursor for page 1, etc. Cursor is sheet row number to start scanning at.
-  let history = [2]; // start scanning from row 2 (row 1 is header)
+  let history = [2]; // start scanning from row 2
   let pageIndex = 0;
   let done = false;
 
@@ -127,21 +124,16 @@
     elTbody.appendChild(frag);
   }
 
-  function updateUI(shownCount, nextCursor, serverDone) {
+  function updateUI(shownCount, serverDone) {
     btnPrev.disabled = pageIndex === 0;
-
-    // If the server says done and we are on the last known page cursor, disable Next
     const lastKnown = pageIndex === history.length - 1;
     btnNext.disabled = !!serverDone && lastKnown;
 
-    const humanPage = pageIndex + 1;
-    const more = serverDone ? "End of results" : "More available";
-    pageInfo.textContent = `Page ${humanPage} • ${more} • Showing ${shownCount} rows`;
-
+    pageInfo.textContent = `Page ${pageIndex + 1} • ${serverDone ? "End of results" : "More available"} • Showing ${shownCount} rows`;
     elCount.textContent = `${shownCount.toLocaleString()} rows shown`;
   }
 
-  // JSONP request helper (avoids CORS)
+  // JSONP helper
   function jsonp(url) {
     return new Promise((resolve, reject) => {
       const cbName = `__cb_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -157,11 +149,7 @@
       };
 
       function cleanup() {
-        try {
-          delete window[cbName];
-        } catch (_) {
-          window[cbName] = undefined;
-        }
+        try { delete window[cbName]; } catch (_) { window[cbName] = undefined; }
         script.remove();
       }
 
@@ -179,13 +167,11 @@
     setStatus("Loading…");
 
     const cursor = history[pageIndex];
-
     const url =
       API_URL +
       `?q=${encodeURIComponent(q)}&pageSize=${encodeURIComponent(pageSize)}&cursor=${encodeURIComponent(cursor)}`;
 
     const data = await jsonp(url);
-
     if (!data || !data.ok) throw new Error((data && data.error) ? data.error : "Server returned ok=false");
 
     if (!headers.length) {
@@ -194,15 +180,14 @@
     }
 
     renderRows(data.rows || []);
-
     done = !!data.done;
 
-    // Extend history with nextCursor when we are at the end of history
+    // Add next cursor to history when provided (only when on last known page)
     if (pageIndex === history.length - 1 && data.nextCursor) {
       history.push(data.nextCursor);
     }
 
-    updateUI((data.rows || []).length, data.nextCursor, done);
+    updateUI((data.rows || []).length, done);
     setStatus("Loaded.");
   }
 
@@ -216,13 +201,11 @@
     loadPage().catch((e) => showError(String(e?.message || e)));
   }
 
-  // ==== Events ====
+  // Events
   elQ.addEventListener("input", () => {
     q = elQ.value.trim();
     clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      resetAndLoad();
-    }, 300);
+    debounce = setTimeout(resetAndLoad, 300);
   });
 
   elClear.addEventListener("click", () => {
@@ -245,16 +228,15 @@
   });
 
   btnNext.addEventListener("click", () => {
-    // If next cursor already exists in history, move forward
     if (pageIndex < history.length - 1) {
       pageIndex += 1;
       loadPage().catch((e) => showError(String(e?.message || e)));
     } else {
-      // Otherwise re-load current page; loadPage will append nextCursor if available
+      // reload; will append nextCursor if available
       loadPage().catch((e) => showError(String(e?.message || e)));
     }
   });
 
-  // ==== Initial load ====
+  // Initial load
   loadPage().catch((e) => showError(String(e?.message || e)));
 })();
