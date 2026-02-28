@@ -1,16 +1,9 @@
 // ==== CONFIG ====
-// Your published sheet "d/e/..." id:
 const PUBLISHED_ID = "2PACX-1vTpJ80LL0exuocYsfEmtIPyXIFaWSB6KgEvXhyj1fiTBKCq3NgYwmN89myHz_8XsAMB-mLc_XidopGc";
-// The worksheet gid you shared:
 const GID = "2090917812";
 
-// Optional: if you want to exclude some columns from search, put their header names here:
-// e.g., ["PrimaryKey", "InternalNotes"]
-const EXCLUDE_FROM_SEARCH = [];
-
-// ==== GOOGLE VIS QUERY ENDPOINT ====
-// Uses the published id + gid and returns JSON wrapped in a function call.
-const GVIZ_URL = `https://docs.google.com/spreadsheets/d/e/${encodeURIComponent(PUBLISHED_ID)}/gviz/tq?gid=${encodeURIComponent(GID)}&tqx=out:json`;
+// Published CSV endpoint (works with /d/e/.../pubhtml links)
+const CSV_URL = `https://docs.google.com/spreadsheets/d/e/${encodeURIComponent(PUBLISHED_ID)}/pub?gid=${encodeURIComponent(GID)}&single=true&output=csv`;
 
 const elQ = document.getElementById("q");
 const elClear = document.getElementById("clear");
@@ -32,30 +25,65 @@ function setStatus(msg) {
   elStatus.textContent = msg;
 }
 
-function parseGvizResponse(text) {
-  // Response looks like: google.visualization.Query.setResponse({...});
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end < 0) throw new Error("Unexpected GViz response format.");
-  return JSON.parse(text.slice(start, end + 1));
+// Basic CSV parser that handles quoted fields
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let cur = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (ch === '"' && next === '"') { // escaped quote
+        cur += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cur += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      row.push(cur);
+      cur = "";
+    } else if (ch === "\n") {
+      row.push(cur);
+      rows.push(row);
+      row = [];
+      cur = "";
+    } else if (ch === "\r") {
+      // ignore
+    } else {
+      cur += ch;
+    }
+  }
+
+  // last cell
+  row.push(cur);
+  rows.push(row);
+
+  // trim possible empty trailing row
+  if (rows.length && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === "") {
+    rows.pop();
+  }
+
+  return rows;
 }
 
-function cellToString(cell) {
-  if (!cell) return "";
-  // Prefer formatted value
-  if (typeof cell.f === "string") return cell.f;
-  if (cell.v === null || cell.v === undefined) return "";
-  return String(cell.v);
-}
-
-function buildTable(cols, rows) {
+function buildTable(headers, dataRows) {
   // Header
   elThead.innerHTML = "";
   const trh = document.createElement("tr");
-  const headers = cols.map(c => (c.label && c.label.trim()) ? c.label.trim() : "");
   headers.forEach(h => {
     const th = document.createElement("th");
-    th.textContent = h;
+    th.textContent = h || "";
     trh.appendChild(th);
   });
   elThead.appendChild(trh);
@@ -64,16 +92,12 @@ function buildTable(cols, rows) {
   elTbody.innerHTML = "";
   rowSearchText = [];
 
-  const excludedIdx = new Set(
-    headers
-      .map((h, i) => [h, i])
-      .filter(([h]) => EXCLUDE_FROM_SEARCH.includes(h))
-      .map(([, i]) => i)
-  );
-
-  rows.forEach((r) => {
+  dataRows.forEach((r) => {
     const tr = document.createElement("tr");
-    const values = (r.c || []).map(cellToString);
+    const values = r.map(v => (v ?? "").toString());
+
+    // pad short rows so table stays aligned
+    while (values.length < headers.length) values.push("");
 
     values.forEach(v => {
       const td = document.createElement("td");
@@ -81,13 +105,7 @@ function buildTable(cols, rows) {
       tr.appendChild(td);
     });
 
-    // Precompute searchable text for this row (faster filtering)
-    const searchable = values
-      .filter((_, i) => !excludedIdx.has(i))
-      .join(" ")
-      .toLowerCase();
-
-    rowSearchText.push(searchable);
+    rowSearchText.push(values.join(" ").toLowerCase());
     elTbody.appendChild(tr);
   });
 
@@ -128,17 +146,17 @@ function applyFilter(q) {
 async function load() {
   try {
     setStatus("Loading from Google Sheets…");
-    const res = await fetch(GVIZ_URL, { cache: "no-store" });
+    const res = await fetch(CSV_URL, { cache: "no-store" });
     if (!res.ok) throw new Error(`Fetch failed: HTTP ${res.status}`);
-    const text = await res.text();
-    const json = parseGvizResponse(text);
+    const csvText = await res.text();
 
-    if (json.status !== "ok") {
-      throw new Error(`GViz status not ok: ${JSON.stringify(json, null, 2)}`);
-    }
+    const rows = parseCSV(csvText);
+    if (!rows.length) throw new Error("CSV returned no rows.");
 
-    const table = json.table;
-    buildTable(table.cols || [], table.rows || []);
+    const headers = rows[0];
+    const dataRows = rows.slice(1);
+
+    buildTable(headers, dataRows);
   } catch (e) {
     showError(String(e?.message || e));
   }
