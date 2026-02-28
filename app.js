@@ -1,17 +1,17 @@
-/* ===== Client-side UI that uses server-side search + paging =====
- * Drop-in replacement for app.js
- * Requires index.html elements:
- *   #q, #clear, #count, #status, #err, #tbl thead/tbody
- * Creates Prev/Next + page info automatically.
+/* Client UI (JSONP) for Large Sheet Search + cursor paging
+ * - Does NOT download entire sheet
+ * - Uses Apps Script web app as the data source
+ * - Search stays responsive (server scans until it finds a page of matches)
+ * - Prev/Next uses cursor history
  */
 
 (() => {
   // ==== CONFIG ====
-  const API_URL = "https://script.google.com/macros/s/AKfycbyeuwPih34ngsR-mqM4ntuv0tdkyi5wPNydnvnzCg7znH2AbdZXgDuUAs8fLM2_wkc/exec"; // <-- required
-
+  const API_URL =
+    "https://script.google.com/macros/s/AKfycbzB-8NNBvX9-KAqNzmOpPMPeJBPsrk6kA7cDEm-hFq5T_eiqp7AdviTTzeC53UwcrYh/exec";
   const DEFAULT_PAGE_SIZE = 200;
 
-  // ==== DOM ====
+  // ==== DOM (required) ====
   const elQ = document.getElementById("q");
   const elClear = document.getElementById("clear");
   const elCount = document.getElementById("count");
@@ -65,17 +65,20 @@
   pager.appendChild(sizeLabel);
   pager.appendChild(selSize);
 
-  // Insert pager after status
   elStatus.parentNode.insertBefore(pager, elStatus.nextSibling);
 
   // ==== State ====
-  let query = "";
-  let page = 1;
-  let pageSize = DEFAULT_PAGE_SIZE;
-  let totalMatches = 0;
   let headers = [];
+  let q = "";
+  let pageSize = DEFAULT_PAGE_SIZE;
 
-  let debounceTimer = null;
+  // Cursor paging
+  // history[0] is cursor for page 1, etc. Cursor is sheet row number to start scanning at.
+  let history = [2]; // start scanning from row 2 (row 1 is header)
+  let pageIndex = 0;
+  let done = false;
+
+  let debounce = null;
 
   function setStatus(msg) {
     elStatus.textContent = msg;
@@ -87,7 +90,7 @@
     setStatus("Error.");
   }
 
-  function hideError() {
+  function clearError() {
     elErr.hidden = true;
     elErr.textContent = "";
   }
@@ -124,81 +127,132 @@
     elTbody.appendChild(frag);
   }
 
-  function updatePager() {
-    const totalPages = Math.max(1, Math.ceil(totalMatches / pageSize));
-    btnPrev.disabled = page <= 1;
-    btnNext.disabled = page >= totalPages;
+  function updateUI(shownCount, nextCursor, serverDone) {
+    btnPrev.disabled = pageIndex === 0;
 
-    const start = totalMatches === 0 ? 0 : (page - 1) * pageSize + 1;
-    const end = Math.min(page * pageSize, totalMatches);
+    // If the server says done and we are on the last known page cursor, disable Next
+    const lastKnown = pageIndex === history.length - 1;
+    btnNext.disabled = !!serverDone && lastKnown;
 
-    pageInfo.textContent = `Page ${page} / ${totalPages} • Showing ${start}–${end} of ${totalMatches} matches`;
-    elCount.textContent = `${totalMatches.toLocaleString()} matched rows`;
+    const humanPage = pageIndex + 1;
+    const more = serverDone ? "End of results" : "More available";
+    pageInfo.textContent = `Page ${humanPage} • ${more} • Showing ${shownCount} rows`;
+
+    elCount.textContent = `${shownCount.toLocaleString()} rows shown`;
+  }
+
+  // JSONP request helper (avoids CORS)
+  function jsonp(url) {
+    return new Promise((resolve, reject) => {
+      const cbName = `__cb_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const full = url + (url.includes("?") ? "&" : "?") + "callback=" + encodeURIComponent(cbName);
+
+      const script = document.createElement("script");
+      script.src = full;
+      script.async = true;
+
+      window[cbName] = (data) => {
+        cleanup();
+        resolve(data);
+      };
+
+      function cleanup() {
+        try {
+          delete window[cbName];
+        } catch (_) {
+          window[cbName] = undefined;
+        }
+        script.remove();
+      }
+
+      script.onerror = () => {
+        cleanup();
+        reject(new Error("JSONP load failed"));
+      };
+
+      document.head.appendChild(script);
+    });
   }
 
   async function loadPage() {
-    hideError();
+    clearError();
     setStatus("Loading…");
+
+    const cursor = history[pageIndex];
 
     const url =
       API_URL +
-      `?q=${encodeURIComponent(query)}&page=${encodeURIComponent(page)}&pageSize=${encodeURIComponent(pageSize)}`;
+      `?q=${encodeURIComponent(q)}&pageSize=${encodeURIComponent(pageSize)}&cursor=${encodeURIComponent(cursor)}`;
 
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`Fetch failed: HTTP ${res.status}`);
+    const data = await jsonp(url);
 
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Server returned ok=false");
+    if (!data || !data.ok) throw new Error((data && data.error) ? data.error : "Server returned ok=false");
 
-    // First time, set headers
     if (!headers.length) {
       headers = data.headers || [];
       buildHeader(headers);
     }
 
-    totalMatches = data.totalMatches || 0;
-
     renderRows(data.rows || []);
-    updatePager();
+
+    done = !!data.done;
+
+    // Extend history with nextCursor when we are at the end of history
+    if (pageIndex === history.length - 1 && data.nextCursor) {
+      history.push(data.nextCursor);
+    }
+
+    updateUI((data.rows || []).length, data.nextCursor, done);
     setStatus("Loaded.");
   }
 
-  function runSearchDebounced() {
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      page = 1;
-      loadPage().catch((e) => showError(String(e?.message || e)));
-    }, 250);
+  function resetAndLoad() {
+    headers = [];
+    history = [2];
+    pageIndex = 0;
+    done = false;
+    elThead.innerHTML = "";
+    elTbody.innerHTML = "";
+    loadPage().catch((e) => showError(String(e?.message || e)));
   }
 
   // ==== Events ====
   elQ.addEventListener("input", () => {
-    query = elQ.value.trim();
-    runSearchDebounced();
+    q = elQ.value.trim();
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      resetAndLoad();
+    }, 300);
   });
 
   elClear.addEventListener("click", () => {
     elQ.value = "";
-    query = "";
-    page = 1;
-    loadPage().catch((e) => showError(String(e?.message || e)));
+    q = "";
+    resetAndLoad();
     elQ.focus();
-  });
-
-  btnPrev.addEventListener("click", () => {
-    page -= 1;
-    loadPage().catch((e) => showError(String(e?.message || e)));
-  });
-
-  btnNext.addEventListener("click", () => {
-    page += 1;
-    loadPage().catch((e) => showError(String(e?.message || e)));
   });
 
   selSize.addEventListener("change", () => {
     pageSize = Number(selSize.value) || DEFAULT_PAGE_SIZE;
-    page = 1;
-    loadPage().catch((e) => showError(String(e?.message || e)));
+    resetAndLoad();
+  });
+
+  btnPrev.addEventListener("click", () => {
+    if (pageIndex > 0) {
+      pageIndex -= 1;
+      loadPage().catch((e) => showError(String(e?.message || e)));
+    }
+  });
+
+  btnNext.addEventListener("click", () => {
+    // If next cursor already exists in history, move forward
+    if (pageIndex < history.length - 1) {
+      pageIndex += 1;
+      loadPage().catch((e) => showError(String(e?.message || e)));
+    } else {
+      // Otherwise re-load current page; loadPage will append nextCursor if available
+      loadPage().catch((e) => showError(String(e?.message || e)));
+    }
   });
 
   // ==== Initial load ====
