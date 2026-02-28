@@ -31,7 +31,7 @@
 
   // Pagination defaults
   const PAGE_SIZES = [50, 100, 200, 500, 1000];
-  const DEFAULT_PAGE_SIZE = 200;
+  const DEFAULT_PAGE_SIZE = 50;
 
   // Optional: exclude columns from search by header name
   const EXCLUDE_FROM_SEARCH = []; // e.g. ["PrimaryKey", "InternalNotes"]
