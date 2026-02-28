@@ -1,15 +1,18 @@
-/* Client UI (JSONP) for Large Sheet Search + cursor paging
- * Web app: https://script.google.com/macros/s/AKfycbwjiSb6SWatGt3BInPpzFlW24vhoSmH9ClIozVzhioXUC3aQy7vsJ8Z4Qhk_Iqz0zXj/exec
+/* Client UI (JSONP) for Published-CSV Search API + cursor paging
+ * Web app:
+ *   https://script.google.com/macros/s/AKfycbzTe8aGUvwGhZBkdlNnU4t9vG3esKKGz7ERYUJiZwcD4CIO4ClIgiSkk-ZcK35iKecvdQ/exec
  *
- * Requirements in index.html:
+ * Requires index.html elements:
  *   #q, #clear, #count, #status, #err, #tbl thead/tbody
  */
 
 (() => {
+  // ==== CONFIG ====
   const API_URL =
-    "https://script.google.com/macros/s/AKfycbwjiSb6SWatGt3BInPpzFlW24vhoSmH9ClIozVzhioXUC3aQy7vsJ8Z4Qhk_Iqz0zXj/exec";
+    "https://script.google.com/macros/s/AKfycbzTe8aGUvwGhZBkdlNnU4t9vG3esKKGz7ERYUJiZwcD4CIO4ClIgiSkk-ZcK35iKecvdQ/exec";
   const DEFAULT_PAGE_SIZE = 200;
 
+  // ==== DOM ====
   const elQ = document.getElementById("q");
   const elClear = document.getElementById("clear");
   const elCount = document.getElementById("count");
@@ -23,7 +26,7 @@
     return;
   }
 
-  // Pager UI
+  // ==== Pager UI (auto) ====
   const pager = document.createElement("div");
   pager.style.display = "flex";
   pager.style.gap = "8px";
@@ -65,13 +68,13 @@
 
   elStatus.parentNode.insertBefore(pager, elStatus.nextSibling);
 
-  // State
+  // ==== State ====
   let headers = [];
   let q = "";
   let pageSize = DEFAULT_PAGE_SIZE;
 
-  // Cursor paging
-  let history = [2]; // start scanning from row 2
+  // CSV API uses cursor starting at 1 (data rows, header excluded)
+  let history = [1]; // page 1 starts at cursor=1
   let pageIndex = 0;
   let done = false;
 
@@ -126,6 +129,8 @@
 
   function updateUI(shownCount, serverDone) {
     btnPrev.disabled = pageIndex === 0;
+
+    // disable Next only if server is done and we are on the last known cursor
     const lastKnown = pageIndex === history.length - 1;
     btnNext.disabled = !!serverDone && lastKnown;
 
@@ -167,11 +172,13 @@
     setStatus("Loading…");
 
     const cursor = history[pageIndex];
+
     const url =
       API_URL +
       `?q=${encodeURIComponent(q)}&pageSize=${encodeURIComponent(pageSize)}&cursor=${encodeURIComponent(cursor)}`;
 
     const data = await jsonp(url);
+
     if (!data || !data.ok) throw new Error((data && data.error) ? data.error : "Server returned ok=false");
 
     if (!headers.length) {
@@ -182,7 +189,7 @@
     renderRows(data.rows || []);
     done = !!data.done;
 
-    // Add next cursor to history when provided (only when on last known page)
+    // Extend history with the nextCursor returned by server (only when at end of history)
     if (pageIndex === history.length - 1 && data.nextCursor) {
       history.push(data.nextCursor);
     }
@@ -193,7 +200,7 @@
 
   function resetAndLoad() {
     headers = [];
-    history = [2];
+    history = [1];
     pageIndex = 0;
     done = false;
     elThead.innerHTML = "";
@@ -232,7 +239,7 @@
       pageIndex += 1;
       loadPage().catch((e) => showError(String(e?.message || e)));
     } else {
-      // reload; will append nextCursor if available
+      // If we haven't yet gotten nextCursor, reload; loadPage will append it if available
       loadPage().catch((e) => showError(String(e?.message || e)));
     }
   });
