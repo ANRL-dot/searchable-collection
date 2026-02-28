@@ -3,7 +3,7 @@ const PUBLISHED_ID = "2PACX-1vTpJ80LL0exuocYsfEmtIPyXIFaWSB6KgEvXhyj1fiTBKCq3NgY
 const GID = "2090917812";
 
 // Published CSV endpoint (works with /d/e/.../pubhtml links)
-const CSV_URL = `https://docs.google.com/spreadsheets/d/e/${encodeURIComponent(PUBLISHED_ID)}/pub?gid=${encodeURIComponent(GID)}&single=true&output=csv`;
+const CSV_URL = `https://script.google.com/macros/s/AKfycbzU5Aa0hzGthOA1iU-B36jZJ5ipp50JdfpXsMARD2nRL4mb9wEI1MG1hAjJYgkhxFyn/exec`;
 
 const elQ = document.getElementById("q");
 const elClear = document.getElementById("clear");
